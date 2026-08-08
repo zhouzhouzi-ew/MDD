@@ -13,7 +13,7 @@ from scipy.stats import norm
 
 st.set_page_config(page_title="剖宫产抑郁指标分析", layout="wide")
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"
 PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
 
