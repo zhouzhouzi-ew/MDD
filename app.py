@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from scipy.stats import norm
 
 
 st.set_page_config(page_title="剖宫产抑郁指标分析", layout="wide")
@@ -317,6 +318,63 @@ st.markdown(
     """
 <div class="note-panel">
 当前新版 SCM 已包含训练折内预处理、KMeans 多数类压缩、边界负样本保留、少数类增强、Nystroem RBF 显式升维和线性锚定。结果显示：SCM 与 Linear 的差距明显收敛，但在当前数据上 PR-AUC 主结论仍更偏向 Linear；Type A 阳性数仅 12，应按探索性结果解读。
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------- 临床达标线参考:由"可承受 FPR + 最低召回率"倒推合格线 ----------
+RECALL_REQ = 0.70  # 筛查默认最低召回率
+
+
+def _qualified_roc(fpr: float, recall: float) -> float:
+    d = norm.ppf(1 - fpr) - norm.ppf(1 - recall)
+    return float(norm.cdf(d / np.sqrt(2)))
+
+
+def _qualified_pr(fpr: float, recall: float, pi: float, n: int = 120001) -> float:
+    d = norm.ppf(1 - fpr) - norm.ppf(1 - recall)
+    t = np.linspace(-8.0, d + 8.0, n)
+    tpr = 1.0 - norm.cdf(t - d)
+    fprv = 1.0 - norm.cdf(t)
+    den = pi * tpr + (1.0 - pi) * fprv
+    prec = np.divide(pi * tpr, den, out=np.ones_like(den), where=den > 0)
+    return float(np.trapezoid(prec[::-1], tpr[::-1]))
+
+
+def _precision_at(fpr: float, recall: float, pi: float) -> float:
+    return pi * recall / (pi * recall + (1.0 - pi) * fpr)
+
+
+def _recall_at(fpr: float, roc_auc: float) -> float:
+    d = np.sqrt(2) * norm.ppf(roc_auc)
+    return 1.0 - norm.cdf(norm.ppf(1 - fpr) - d)
+
+
+pi_a = BASELINE["A"]["n_pos"] / BASELINE["A"]["n_total"]
+pi_b = BASELINE["B"]["n_pos"] / BASELINE["B"]["n_total"]
+qual_rows = []
+for fpr in (0.005, 0.01, 0.05):
+    qual_rows.append({
+        "可承受FPR": f"{fpr:.1%}",
+        "达标ROC-AUC": f"{_qualified_roc(fpr, RECALL_REQ):.3f}",
+        "达标PR-AUC A/B": f"{_qualified_pr(fpr, RECALL_REQ, pi_a):.3f} / {_qualified_pr(fpr, RECALL_REQ, pi_b):.3f}",
+        "工作点Precision A/B": f"{_precision_at(fpr, RECALL_REQ, pi_a):.1%} / {_precision_at(fpr, RECALL_REQ, pi_b):.1%}",
+        "每例真阳需随访假阳 A/B": f"{(1 - pi_a) * fpr / (pi_a * RECALL_REQ):.1f} / {(1 - pi_b) * fpr / (pi_b * RECALL_REQ):.1f}",
+        "当前模型Recall A/B": f"{_recall_at(fpr, best_a['roc_auc_median']):.0%} / {_recall_at(fpr, best_b['roc_auc_median']):.0%}",
+    })
+qual_df = pd.DataFrame(qual_rows)
+
+st.markdown("---")
+st.subheader("临床达标线参考")
+st.caption("判定逻辑:由临床可承受的假阳性率(FPR,愿意标记复核的人群比例)+ 最低召回率(筛查默认 70%)倒推合格线,而非给定固定 AUC。")
+st.dataframe(qual_df, width='stretch', hide_index=True)
+st.markdown(
+    f"""
+<div class="note-panel">
+<b>解读</b>:按 FPR=1% 的常规随访负担,合格要求是召回率≥70% 时 ROC-AUC ≥ {_qualified_roc(0.01, RECALL_REQ):.3f}。
+当前最优模型(Linear)在 FPR=1% 下实际召回率:定义A ≈ {_recall_at(0.01, best_a['roc_auc_median']):.0%}、定义B ≈ {_recall_at(0.01, best_b['roc_auc_median']):.0%},未达临床线。<br>
+定义A 全组仅 12 例阳性,受患病率天花板限制,Precision 与 PR-AUC 天然偏低,应以"该 FPR 下的召回率 / 假阳随访负担"判定,不宜用 PR-AUC 卡线。
 </div>
 """,
     unsafe_allow_html=True,
